@@ -10,11 +10,18 @@ import java.net.Socket;
 import java.net.URI;
 import java.net.URLConnection;
 import java.net.UnknownHostException;
+import java.security.SecureRandom;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import javax.net.SocketFactory;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 import org.apache.log4j.Logger;
 
@@ -27,7 +34,7 @@ import forskbot.Configuration;
  */
 public class IrcBot {
 
-	public static final Pattern URL_PATTERN = Pattern.compile("^((?i:http://.*)|(?i:www\\..*)|([a-zA-Z0-9\\-]+?(\\.[a-zA-Z0-9\\-]+?)+?/.*))$");
+	public static final Pattern URL_PATTERN = Pattern.compile("^((?i:https?://.*)|(?i:www\\..*)|([a-zA-Z0-9\\-]+?(\\.[a-zA-Z0-9\\-]+?)+?/.*))$");
 	public static final Pattern TITLE_PATTERN = Pattern.compile("^.*(<[\\s+]?(?i:title)[\\s+]?>(.*?)<[\\s+]?/[\\s+]?(?i:title)[\\s+]?>).*$");
 	public static final int CONNECT_TIMEOUT_MS = 2000;
 	public static final int PING_TIMEOUT_MS = 350000;
@@ -110,12 +117,11 @@ public class IrcBot {
 				synchronized (this) {
 					String line = reader.readLine();
 
-					if (line == null) {
+					if (line == null || line.isEmpty()) {
 						continue;
 					}
 
-					if (line != null && line.length() > MAX_SERVER_LINE_LENGTH && !line.isEmpty()) {
-						// Maybe warn?
+					if (line != null && line.length() > MAX_SERVER_LINE_LENGTH) {
 						continue;
 					}
 
@@ -148,7 +154,26 @@ public class IrcBot {
 										break;
 									}
 								} else {
-									detectParseUrls(chanOrNick, messageParts);
+									log.debug("Detecing url from: " + Arrays.toString(messageParts));
+									int currMatches = 0;
+									for (int i = 0; i < messageParts.length; i++) {
+										String part = messageParts[i];
+										if (i == 0) {
+											part = part.substring(1);
+										}
+
+										if (URL_PATTERN.matcher(part).matches()) {
+											if (currMatches++ >= MAX_URLMATCHES_PERLINE) {
+												break;
+											}
+
+											try {
+												new Thread(new TitleHandler(chanOrNick, part)).start();
+											} catch (Throwable t) {
+												log.error(t);
+											}
+										}
+									}
 								}
 							}
 
@@ -164,39 +189,13 @@ public class IrcBot {
 						}
 					}
 
-					log.warn("Unhandled: " + Arrays.toString(parts));
+					log.info("Unhandled: " + Arrays.toString(parts));
 				}
 			}
 		} finally {
 			reader.close();
 			writer.close();
 			log.info("Closing connection.");
-		}
-	}
-
-	/**
-	 * May be flooded if in multiple channels
-	 */
-	private void detectParseUrls(String chanOrNick, String[] messageParts) {
-
-		int currMatches = 0;
-		for (int i = 0; i < messageParts.length; i++) {
-			String part = messageParts[i];
-			if (i == 0) {
-				part = part.substring(1);
-			}
-
-			if (URL_PATTERN.matcher(part).matches()) {
-				if (currMatches++ >= MAX_URLMATCHES_PERLINE) {
-					break;
-				}
-
-				try {
-					new Thread(new TitleHandler(chanOrNick, part)).start();
-				} catch (Throwable t) {
-					log.error(t);
-				}
-			}
 		}
 	}
 
@@ -207,9 +206,10 @@ public class IrcBot {
 
 		public TitleHandler(String chanOrNick, String uriStr) throws IllegalArgumentException {
 
-			if (!uriStr.toLowerCase().startsWith("http://")) {
+			if (!uriStr.toLowerCase().startsWith("http://") && !uriStr.toLowerCase().startsWith("https://")) {
 				uriStr = "http://" + uriStr;
 			}
+
 			uri = URI.create(uriStr);
 
 			this.chanOrNick = chanOrNick;
@@ -226,6 +226,31 @@ public class IrcBot {
 
 			try {
 				URLConnection conn = uri.toURL().openConnection();
+				if (uri.getScheme().equals("https")) {
+					HttpsURLConnection https = (HttpsURLConnection) conn;
+					SSLContext sc = SSLContext.getInstance("TLS");
+					TrustManager[] tm = new TrustManager[] { new X509TrustManager() {
+
+						@Override
+						public void checkClientTrusted(X509Certificate[] arg0, String arg1) throws CertificateException {
+
+						}
+
+						@Override
+						public void checkServerTrusted(X509Certificate[] arg0, String arg1) throws CertificateException {
+
+						}
+
+						@Override
+						public X509Certificate[] getAcceptedIssuers() {
+
+							return null;
+						}
+
+					} };
+					sc.init(null, tm, new SecureRandom());
+					https.setSSLSocketFactory(sc.getSocketFactory());
+				}
 				conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
 				conn.setReadTimeout(CONNECT_TIMEOUT_MS);
 				conn.setUseCaches(false);
@@ -240,10 +265,14 @@ public class IrcBot {
 
 					urlReader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
 					String line = null;
+					StringBuffer buffer = new StringBuffer();
 					// Could use a max_nr_lines_read limit
 					while ((line = urlReader.readLine()) != null) {
 
-						Matcher matcher = TITLE_PATTERN.matcher(line);
+						buffer.append(line);
+						line = null;
+
+						Matcher matcher = TITLE_PATTERN.matcher(buffer);
 						if (matcher.find()) {
 							String pageTitle = matcher.group(2).replaceAll("\\s+", " ").trim();
 							TitleSimilarity ts = new TitleSimilarity(uri.toASCIIString(), pageTitle);

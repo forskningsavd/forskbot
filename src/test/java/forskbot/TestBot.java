@@ -20,7 +20,8 @@ public class TestBot extends AbstractTest {
 	@Test
 	public void testUrlMatch() {
 
-		String[] toMatch = { "www.google.coM", "www.google.com/one?two=three", "http://www.google.com", "http://www.google.com/hellothere", "google.com/hello" };
+		String[] toMatch = { "www.google.coM", "www.google.com/one?two=three", "http://www.google.com", "http://www.google.com/hellothere", "google.com/hello",
+				"http://www.youtube.com/watch?v=aAAAAaAAaAA" };
 
 		for (String match : toMatch) {
 			Assert.assertTrue(IrcBot.URL_PATTERN.matcher(match).matches());
@@ -41,7 +42,7 @@ public class TestBot extends AbstractTest {
 		props.setProperty(Configuration.PROP_CHANNELS, "#nine13132"); // nine1238
 		props.setProperty(Configuration.PROP_HOST, "irc.freenode.org");
 		props.setProperty(Configuration.PROP_PORT, "6667");
-		props.setProperty(Configuration.PROP_NICK, "Gordon16k");
+		props.setProperty(Configuration.PROP_NICK, "g99k");
 
 		Configuration config = Configuration.getSelf();
 		config.parseRawConfig(props);

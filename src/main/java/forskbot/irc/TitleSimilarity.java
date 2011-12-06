@@ -23,7 +23,6 @@ public class TitleSimilarity {
 	private void matchFilteredContained(String uri, String title) {
 
 		for (String word : title.split("\\s+")) {
-			System.err.println(word);
 			if (word.length() >= WORDLEN_THRESH && word.matches("\\w+")) {
 				keywordsTotal++;
 				if (uri.contains(word)) {
