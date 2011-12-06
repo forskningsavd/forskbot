@@ -1,3 +1,4 @@
+
 package forskbot.irc;
 
 import java.io.BufferedReader;
@@ -9,9 +10,7 @@ import java.net.Socket;
 import java.net.URI;
 import java.net.URLConnection;
 import java.net.UnknownHostException;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -23,8 +22,15 @@ import forskbot.Configuration;
 
 /**
  * 
+ * @author interhack
+ * 
  */
 public class IrcBot {
+
+	public static final Pattern URL_PATTERN = Pattern.compile("^((?i:http://.*)|(?i:www\\..*)|([a-zA-Z0-9\\-]+?(\\.[a-zA-Z0-9\\-]+?)+?/.*))$");
+	public static final Pattern TITLE_PATTERN = Pattern.compile("^.*(<[\\s+]?(?i:title)[\\s+]?>(.*?)<[\\s+]?/[\\s+]?(?i:title)[\\s+]?>).*$");
+	public static final int CONNECT_TIMEOUT_MS = 2000;
+	public static final int PING_TIMEOUT_MS = 350000;
 
 	private Logger log = Logger.getLogger(IrcBot.class);
 	private String host;
@@ -34,22 +40,25 @@ public class IrcBot {
 	private Socket socket;
 	private BufferedReader reader;
 	private BufferedWriter writer;
-	private static final int MAX_SERVER_LINE_LENGTH = 2000;
+	private static final int MAX_SERVER_LINE_LENGTH = 5000;
 	private static final int MAX_URLMATCHES_PERLINE = 3;
 	private boolean reconnect = true;
 	//
 	private String nl = "\r\n";
 
 	public IrcBot() {
+
 		Configuration config = Configuration.getSelf();
 
 		this.host = config.getHost();
 		this.port = config.getPort();
 		this.nick = config.getNick();
 		this.name = config.getName();
+
 	}
 
 	private void setRequestProperties(URLConnection conn) {
+
 		conn.setRequestProperty("User-Agent", "Mozilla/5.0 (X11; Unknown x86_64; rv:199.0) Gecko/20990101 Firefox/199.0");
 		conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml");
 		conn.setRequestProperty("Accept-Language", "en");
@@ -63,6 +72,7 @@ public class IrcBot {
 	 * @throws UnknownHostException
 	 */
 	public void connect() throws UnknownHostException, IOException {
+
 		socket = SocketFactory.getDefault().createSocket(host, port);
 
 		if (!socket.isConnected()) {
@@ -76,6 +86,7 @@ public class IrcBot {
 	}
 
 	private void write(String line) throws IOException {
+
 		synchronized (writer) {
 			line = line.replaceAll("\\s+", " ");
 			log.info("out: " + line);
@@ -85,23 +96,19 @@ public class IrcBot {
 	}
 
 	/**
-	 * Read a raw line from irc.
-	 */
-	private String read() throws IOException {
-		return reader.readLine();
-	}
-
-	/**
 	 * Loop over reads from server. The lines received will be in the form of
 	 * "<server id> <irc protocol command> <the rest ...>"
 	 * 
 	 * @throws IOException
 	 */
 	public void rwLoop() throws IOException {
+
+		long lastPingRecv = System.currentTimeMillis();
+
 		try {
 			while (socket.isConnected()) {
 				synchronized (this) {
-					String line = read();
+					String line = reader.readLine();
 
 					if (line == null) {
 						continue;
@@ -115,10 +122,12 @@ public class IrcBot {
 					String[] parts = line.split("\\s+");
 					line = null;
 
-					/**
-					 * Respond to PING
-					 */
-					if (parts[0].startsWith("PING")) {
+					long nowTS = System.currentTimeMillis();
+					if ((nowTS - lastPingRecv) > PING_TIMEOUT_MS) {
+						reconnect = true;
+						break;
+					} else if (parts[0].startsWith("PING")) {
+						lastPingRecv = nowTS;
 						write("PONG " + parts[1].substring(1));
 						continue;
 					} else if (parts.length >= 3) {
@@ -165,13 +174,11 @@ public class IrcBot {
 		}
 	}
 
-	public static final Pattern URL_PATTERN = Pattern.compile("^((?i:http://.*)|(?i:www\\..*)|([a-zA-Z0-9\\-]+?(\\.[a-zA-Z0-9\\-]+?)+?/.*))$");
-	public static final Pattern TITLE_PATTERN = Pattern.compile("^.*(<[\\s+]?(?i:title)[\\s+]?>(.*?)<[\\s+]?/[\\s+]?(?i:title)[\\s+]?>).*$");
-
 	/**
 	 * May be flooded if in multiple channels
 	 */
 	private void detectParseUrls(String chanOrNick, String[] messageParts) {
+
 		int currMatches = 0;
 		for (int i = 0; i < messageParts.length; i++) {
 			String part = messageParts[i];
@@ -211,6 +218,7 @@ public class IrcBot {
 
 		@Override
 		public void run() {
+
 			if (this.chanOrNick == null || this.chanOrNick.isEmpty() || !this.chanOrNick.startsWith("#") || this.chanOrNick.equals("null")) {
 				log.error("Chan or nick must not be empty.");
 				return;
@@ -218,8 +226,8 @@ public class IrcBot {
 
 			try {
 				URLConnection conn = uri.toURL().openConnection();
-				conn.setConnectTimeout(2000);
-				conn.setReadTimeout(2000);
+				conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+				conn.setReadTimeout(CONNECT_TIMEOUT_MS);
 				conn.setUseCaches(false);
 				conn.setDoOutput(false);
 				conn.setDoInput(true);
@@ -231,23 +239,18 @@ public class IrcBot {
 				try {
 
 					urlReader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-					StringBuilder response = new StringBuilder();
 					String line = null;
 					// Could use a max_nr_lines_read limit
 					while ((line = urlReader.readLine()) != null) {
 
-						response.append(line);
-						line = null;
-
-						Matcher matcher = TITLE_PATTERN.matcher(response);
+						Matcher matcher = TITLE_PATTERN.matcher(line);
 						if (matcher.find()) {
-							String pageTitle = matcher.group(2).trim();
-							if (!isSelfExplanatory(pageTitle)) {
+							String pageTitle = matcher.group(2).replaceAll("\\s+", " ").trim();
+							TitleSimilarity ts = new TitleSimilarity(uri.toASCIIString(), pageTitle);
+
+							if (!ts.isSimilar()) {
 								log.info("Writeback of url to " + chanOrNick + " : " + chanOrNick);
-								// write("PRIVMSG " + chanOrNick + " :" +
-								// pageTitle);
 								synchronized (writer) {
-									pageTitle = pageTitle.replaceAll("\\s+", " ");
 									writer.write("PRIVMSG " + chanOrNick + " :" + pageTitle + "\n");
 									writer.flush();
 								}
@@ -268,64 +271,10 @@ public class IrcBot {
 				log.error(e);
 			}
 		}
-
-		private boolean isSelfExplanatory(String pageTitle) {
-			String[] uriWords = uri.toASCIIString().split("\\p{Punct}");
-			String[] titleWords = filterSmallWords(pageTitle.split("[\\p{Punct}\\s+]"));
-
-			if (uriWords.length > titleWords.length) {
-				return isSimilar(uriWords, titleWords);
-			} else {
-				return isSimilar(titleWords, uriWords);
-			}
-		}
-
-		private String[] filterSmallWords(String[] arr) {
-			List<String> longWordsArr = new ArrayList<String>();
-
-			for (String word : arr) {
-				if (word.length() > 2) {
-					longWordsArr.add(word);
-				}
-			}
-
-			return longWordsArr.toArray(new String[] {});
-		}
-
-		/**
-		 * 30% match
-		 */
-		public boolean isSimilar(String[] biggerArr, String[] smallerArr) {
-			int nrMatched = 0;
-			for (String smallArrWord : smallerArr) {
-				if (containsWordIgnoreCase(biggerArr, smallArrWord)) {
-					nrMatched++;
-				}
-			}
-
-			float percentContained = (float) nrMatched / smallerArr.length;
-
-			if (percentContained >= 0.3f) {
-				log.debug("Similar arrays (" + percentContained + "%): " + Arrays.toString(biggerArr) + " with " + Arrays.toString(smallerArr));
-				return true;
-			} else {
-				return false;
-			}
-
-		}
-
-		private boolean containsWordIgnoreCase(String[] arr, String word) {
-			String low = word.toLowerCase();
-			for (String arrWord : arr) {
-				if (arrWord.toLowerCase().equals(low)) {
-					return true;
-				}
-			}
-			return false;
-		}
 	}
 
 	public boolean isReconnect() {
+
 		return reconnect;
 	}
 }

@@ -1,3 +1,4 @@
+
 package forskbot;
 
 import java.io.File;
@@ -7,8 +8,8 @@ import org.apache.log4j.Logger;
 import forskbot.irc.IrcBot;
 
 /**
- * Entry point.
  * 
+ * @author interhack
  * 
  */
 public class Main {

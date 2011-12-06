@@ -10,6 +10,11 @@ import java.util.Properties;
 
 import org.apache.log4j.Logger;
 
+/**
+ * 
+ * @author interhack
+ * 
+ */
 public final class Configuration {
 
 	public static final String PROP_HOST = "forskbot.host";
