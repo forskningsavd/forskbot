@@ -14,12 +14,18 @@ import java.security.SecureRandom;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 import javax.net.SocketFactory;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
@@ -38,6 +44,8 @@ public class IrcBot {
 	public static final Pattern TITLE_PATTERN = Pattern.compile("^.*(<[\\s+]?(?i:title)[\\s+]?>(.*?)<[\\s+]?/[\\s+]?(?i:title)[\\s+]?>).*$");
 	public static final int CONNECT_TIMEOUT_MS = 2000;
 	public static final int PING_TIMEOUT_MS = 350000;
+	public static final int MAX_SERVER_LINE_LENGTH = 5000;
+	public static final int MAX_URLMATCHES_PERLINE = 3;
 
 	private Logger log = Logger.getLogger(IrcBot.class);
 	private String host;
@@ -47,13 +55,15 @@ public class IrcBot {
 	private Socket socket;
 	private BufferedReader reader;
 	private BufferedWriter writer;
-	private static final int MAX_SERVER_LINE_LENGTH = 5000;
-	private static final int MAX_URLMATCHES_PERLINE = 3;
+	private ExecutorService es;
 	private boolean reconnect = true;
 	//
 	private String nl = "\r\n";
+	private SSLSocketFactory sf;
+	private Set<String> ignores;
+	private Set<String> quitVoters;
 
-	public IrcBot() {
+	public IrcBot() throws Exception {
 
 		Configuration config = Configuration.getSelf();
 
@@ -61,7 +71,30 @@ public class IrcBot {
 		this.port = config.getPort();
 		this.nick = config.getNick();
 		this.name = config.getName();
+		this.es = Executors.newSingleThreadExecutor();
+		SSLContext sc = SSLContext.getInstance("TLS");
+		TrustManager[] tm = new TrustManager[] { new X509TrustManager() {
 
+			@Override
+			public void checkClientTrusted(X509Certificate[] arg0, String arg1) throws CertificateException {
+
+			}
+
+			@Override
+			public void checkServerTrusted(X509Certificate[] arg0, String arg1) throws CertificateException {
+
+			}
+
+			@Override
+			public X509Certificate[] getAcceptedIssuers() {
+
+				return null;
+			}
+		} };
+		sc.init(null, tm, new SecureRandom());
+		this.sf = sc.getSocketFactory();
+		this.ignores = new HashSet<String>();
+		this.quitVoters = new HashSet<String>();
 	}
 
 	private void setRequestProperties(URLConnection conn) {
@@ -98,6 +131,14 @@ public class IrcBot {
 			line = line.replaceAll("\\s+", " ");
 			log.info("out: " + line);
 			writer.write(line + nl);
+			writer.flush();
+		}
+	}
+
+	private void privmsg(String msg, String target) throws IOException {
+
+		synchronized (writer) {
+			writer.write("PRIVMSG " + target + " :" + msg + nl);
 			writer.flush();
 		}
 	}
@@ -146,15 +187,42 @@ public class IrcBot {
 
 							// Handle only public
 							if (chanOrNick.startsWith("#")) {
-								// Bot command
 								if (messageParts.length >= 2 && messageParts[0].matches(":" + Configuration.getSelf().getNick() + ".?")) {
+									// Bot commands
 									if (messageParts[1].equals("!quit")) {
-										write("QUIT :Byte");
-										reconnect = false;
-										break;
+										log.info("Quit vote from: " + parts[0]);
+										quitVoters.add(parts[0]);
+										int left = 3 - quitVoters.size();
+										if (left == 0) {
+											write("QUIT :Byte");
+											reconnect = false;
+											break;
+										} else {
+											privmsg(left + " more", chanOrNick);
+										}
+
+										continue;
+									} else if (messageParts[1].equals("!ignore")) {
+
+										try {
+											if (!messageParts[2].endsWith("$")) {
+												messageParts[2] = messageParts[2] + "$";
+											}
+											if (!messageParts[2].startsWith("^")) {
+												messageParts[2] = "^" + messageParts[2];
+											}
+											ignores.add(messageParts[2].trim());
+										} catch (PatternSyntaxException pse) {
+											log.error("Invalid pattern: " + pse.getPattern() + " from: " + chanOrNick);
+											privmsg("fail", chanOrNick);
+										}
+										privmsg("word", chanOrNick);
+										continue;
+									} else {
+										privmsg("fail", chanOrNick);
+										continue;
 									}
 								} else {
-									log.debug("Detecing url from: " + Arrays.toString(messageParts));
 									int currMatches = 0;
 									for (int i = 0; i < messageParts.length; i++) {
 										String part = messageParts[i];
@@ -168,9 +236,19 @@ public class IrcBot {
 											}
 
 											try {
-												new Thread(new TitleHandler(chanOrNick, part)).start();
-											} catch (Throwable t) {
-												log.error(t);
+												boolean ign = false;
+												for (String ignore : ignores) {
+													if (part.matches(ignore)) {
+														log.info("Ignore: " + part + " with pattern: " + ignore);
+														ign = true;
+														break;
+													}
+												}
+												if (!ign) {
+													es.execute(new TitleHandler(chanOrNick, part));
+												}
+											} catch (IllegalArgumentException iae) {
+												log.error(iae);
 											}
 										}
 									}
@@ -199,7 +277,7 @@ public class IrcBot {
 		}
 	}
 
-	private class TitleHandler implements Runnable {
+	public class TitleHandler implements Runnable {
 
 		private String chanOrNick;
 		private URI uri;
@@ -211,9 +289,7 @@ public class IrcBot {
 			}
 
 			uri = URI.create(uriStr);
-
 			this.chanOrNick = chanOrNick;
-
 		}
 
 		@Override
@@ -228,28 +304,7 @@ public class IrcBot {
 				URLConnection conn = uri.toURL().openConnection();
 				if (uri.getScheme().equals("https")) {
 					HttpsURLConnection https = (HttpsURLConnection) conn;
-					SSLContext sc = SSLContext.getInstance("TLS");
-					TrustManager[] tm = new TrustManager[] { new X509TrustManager() {
-
-						@Override
-						public void checkClientTrusted(X509Certificate[] arg0, String arg1) throws CertificateException {
-
-						}
-
-						@Override
-						public void checkServerTrusted(X509Certificate[] arg0, String arg1) throws CertificateException {
-
-						}
-
-						@Override
-						public X509Certificate[] getAcceptedIssuers() {
-
-							return null;
-						}
-
-					} };
-					sc.init(null, tm, new SecureRandom());
-					https.setSSLSocketFactory(sc.getSocketFactory());
+					https.setSSLSocketFactory(sf);
 				}
 				conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
 				conn.setReadTimeout(CONNECT_TIMEOUT_MS);
@@ -275,16 +330,18 @@ public class IrcBot {
 						Matcher matcher = TITLE_PATTERN.matcher(buffer);
 						if (matcher.find()) {
 							String pageTitle = matcher.group(2).replaceAll("\\s+", " ").trim();
-							TitleSimilarity ts = new TitleSimilarity(uri.toASCIIString(), pageTitle);
 
-							if (!ts.isSimilar()) {
+							float score = isSimilar(uri.toASCIIString().toLowerCase(), pageTitle);
+							if (score <= 0.3f) {
+								log.info("Title contained in url (" + score + "): " + uri.toASCIIString() + " title: " + pageTitle);
 								log.info("Writeback of url to " + chanOrNick + " : " + chanOrNick);
 								synchronized (writer) {
-									writer.write("PRIVMSG " + chanOrNick + " :" + pageTitle + "\n");
+									writer.write("PRIVMSG " + chanOrNick + " :" + pageTitle + nl);
 									writer.flush();
 								}
 								break;
 							} else {
+								log.info("Title not contained in url (" + score + "): " + uri.toASCIIString() + " title: " + pageTitle);
 								break;
 							}
 						}
@@ -299,6 +356,28 @@ public class IrcBot {
 			} catch (Throwable e) {
 				log.error(e);
 			}
+		}
+
+		public float isSimilar(String uri, String title) {
+
+			int keywordsTotal = 0;
+			int keywordsContained = 0;
+			float score = 0f;
+
+			for (String word : title.split("\\s+")) {
+				if (word.length() >= 2) {
+					keywordsTotal++;
+					if (uri.contains(word.toLowerCase())) {
+						keywordsContained++;
+					}
+				}
+			}
+
+			if (keywordsTotal == 0 || keywordsContained == 0) {
+				return -1;
+			}
+			score = (float) keywordsContained / keywordsTotal;
+			return score;
 		}
 	}
 
